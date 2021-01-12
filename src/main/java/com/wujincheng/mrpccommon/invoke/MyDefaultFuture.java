@@ -35,7 +35,7 @@ public class MyDefaultFuture extends CompletableFuture<Object> {
                 public Thread newThread(Runnable r) {
                     Thread t=new Thread(r);
                     t.setDaemon(true);
-                    t.setName("fyl-myDefaultFuture-timeout-"+mThreadNum.getAndIncrement());
+                    t.setName("myDefaultFuture-timeout-"+mThreadNum.getAndIncrement());
                     return t;
                 }
             },
