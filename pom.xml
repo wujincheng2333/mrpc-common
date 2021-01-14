@@ -7,7 +7,7 @@
 
     <groupId>com.github.wujincheng2333</groupId>
     <artifactId>mrpc-common</artifactId>
-    <version>1.0.0</version>
+    <version>1.0.2</version>
 
     <distributionManagement>
         <repository>

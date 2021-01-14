@@ -553,7 +553,12 @@ public class MRPCInit {
 
         if(!registerVOMap.isEmpty()){
             for(Map.Entry<String,RegisterVO> m:registerVOMap.entrySet()){
-                CacheData.interfaceToIpPort.remove(m.getValue().getIp()+":"+m.getValue().getPort());
+                List<String> interfaces=m.getValue().getInterfaces();
+                for(String in:interfaces){
+                    List<String> ipports=CacheData.interfaceToIpPort.get(in);
+                    ipports.remove(m.getValue().getIp()+":"+m.getValue().getPort());
+                }
+
                 ChannelVO channelVO=CacheData.channelMap.remove(m.getValue().getIp()+":"+m.getValue().getPort());
                 closeClientChannel(channelVO);
                 logger.info("移除服务:[{}]",m.getValue().toString());
