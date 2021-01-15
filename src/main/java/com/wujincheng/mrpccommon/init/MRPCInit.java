@@ -96,13 +96,20 @@ public class MRPCInit {
                 }
             }
         },10000L, 10000L,TimeUnit.MILLISECONDS);
+        if(!springboot){
+            initClass();
+            createServer(Config.properties.getProperty("mrpc.port","20800"));
+            register();
+        }
+    }
 
-        initClass();
-
+    public static void initSpringbootAfter(){
+        Set<Class<?>> classSet= new HashSet<>(2);
+        classSet.add(MyNettyCommonService1207Impl.class);
+        classSet.add(MyNettyCommonService1207Native.class);
+        initClass(classSet);
         createServer(Config.properties.getProperty("mrpc.port","20800"));
-
         register();
-
     }
 
     private static void getSubscribedServices(){
@@ -119,17 +126,7 @@ public class MRPCInit {
         }
     }
 
-    private static void initClass(){
-        String packageName=Config.properties.getProperty("mrpc.packageName","");
-        if("".equals(packageName)){
-            return;
-        }
-        Set<Class<?>> classSet= ClassUtil.getClassSet(packageName);
-        if(classSet==null||classSet.size()==0){
-            return;
-        }
-        classSet.add(MyNettyCommonService1207Impl.class);
-        classSet.add(MyNettyCommonService1207Native.class);
+    private static void initClass(Set<Class<?>> classSet){
         for(Class<?> clz:classSet){
             if(clz.getName().contains("$")){
                 continue;
@@ -174,6 +171,88 @@ public class MRPCInit {
                 }
             }
 
+        }
+    }
+
+    private static void initClass(){
+        String packageName=Config.properties.getProperty("mrpc.packageName","");
+        if("".equals(packageName)){
+            return;
+        }
+        Set<Class<?>> classSet= ClassUtil.getClassSet(packageName);
+        if(classSet==null||classSet.size()==0){
+            return;
+        }
+        classSet.add(MyNettyCommonService1207Impl.class);
+        classSet.add(MyNettyCommonService1207Native.class);
+        initClass(classSet);
+    }
+
+    public static void fieldsSpringboot(Class<?> clz,Object object){
+        try {
+            Field[] fields=clz.getDeclaredFields();
+            if(fields==null||fields.length==0){
+                return;
+            }
+            for(Field f:fields){
+                Class fc=f.getType();
+                if(f.getAnnotation(MRPCReference.class)==null){
+                    continue;
+                }
+                if(CacheData.interfaceReferenceInstance.containsKey(fc.getName())){
+                    f.setAccessible(true);
+                    f.set(object,CacheData.interfaceReferenceInstance.get(fc.getName()));
+                    continue;
+                }
+                MyInvoker myInvoker=new MyInvoker() {
+                    @Override
+                    public Class getInterface() {
+                        return fc;
+                    }
+
+                    @Override
+                    public Object invoke(Invocation invocation) {
+
+                        String ipport=(String) RpcContext.getValue(Common.RPC_INVOKE_IP_PORT);
+                        if(ipport==null){
+                            ipport=getIpPort(invocation.getClassName());
+                        }
+                        if(ipport==null){
+                            throw new RuntimeException("无法找到客户端");
+                        }
+                        Response response=sendRPC02(invocation,ipport);
+                        if(response==null){
+                            throw new RuntimeException("请求异常");
+                        }
+                        Map<String,Object> attachments=RpcContext.getValues();
+                        if(response.getAttachments()!=null&&!response.getAttachments().isEmpty()){
+                            attachments.putAll(response.getAttachments());
+                        }
+                        if(response.getHasExecption()){
+                            Throwable throwable=response.getThrowable();
+                            if(throwable!=null){
+                                throw new RuntimeException(throwable);
+                            }else{
+                                throw new RuntimeException("请求异常");
+                            }
+
+                        }
+                        return response.getData();
+                    }
+                };
+                List<Filter> filterList=new ArrayList<>();
+                filterList.add(new RemoveRpcContextFliter());
+                final MyInvoker myFilterInvoker=getFilterInvoker(myInvoker,filterList);
+                Object fcProxy=javassistProxyFactory.getProxy(fc, new MyInvocationHandler(myFilterInvoker));
+
+                f.setAccessible(true);
+                f.set(object,fcProxy);
+
+                CacheData.interfaceReferenceInstance.put(fc.getName(),fcProxy);
+                CacheData.interfaceReference.add(fc.getName());
+            }
+        }catch (Throwable e){
+            //
         }
     }
 
@@ -387,6 +466,70 @@ public class MRPCInit {
             CacheData.interfaceServiceInstance.put(clz.getName(),obj);
         } catch (Exception e) {
             //e.printStackTrace();
+        }
+    }
+
+
+
+    public static void handleMRPCServiceSpringboot(Class<?> clz,Object fobj){
+
+        Class<?>[] interfaces=clz.getInterfaces();
+        if(interfaces==null||interfaces.length==0){
+            return;
+        }
+
+        try {
+            Class<?> interfaceClass= ClassUtils.forName(interfaces[0].getName());
+            if(CacheData.interfaceServiceInstance.containsKey(interfaceClass.getName())){
+                return;
+            }
+            //fields(clz,obj);
+            CacheData.interfaceServiceInstanceNoWarpper.put(clz.getName(),fobj);
+            final Wrapper wrapperObject= Wrapper.getWrapper(clz);
+            MyInvoker myWrapperInvoker=new MyInvoker() {
+                @Override
+                public Class getInterface() {
+                    return interfaceClass;
+                }
+
+                @Override
+                public Object invoke(Invocation invocation) {
+                    Class<?>[] parameterTypes=new Class<?>[invocation.getParameterClassType().length];
+                    int i=0;
+                    for(String cn:invocation.getParameterClassType()){
+                        try {
+                            Class<?> c=CacheData.classCache.get(cn);
+                            if(c==null){
+                                synchronized (CacheData.classCache){
+                                    c=CacheData.classCache.get(cn);
+                                    if(c==null){
+                                        c=ClassUtils.forName(cn);
+                                        CacheData.classCache.putIfAbsent(cn,c);
+                                    }
+                                }
+                            }
+                            parameterTypes[i]=CacheData.classCache.get(cn);
+                        } catch (ClassNotFoundException e) {
+                            throw new  RuntimeException(e.getMessage(),e.getCause());
+                        }
+                        i++;
+                    }
+                    try {
+
+                        return wrapperObject.invokeMethod(fobj,invocation.getMethodName(),parameterTypes,invocation.getParameter());
+                    } catch (InvocationTargetException e) {
+                        throw new  RuntimeException(e.getMessage(),e.getCause());
+                    }
+
+                }
+            };
+            List<Filter> filterList=new ArrayList<>();
+            filterList.add(new RemoveRpcContextFliter());
+            final MyInvoker myFilterWrapperInvoker=getFilterInvoker(myWrapperInvoker,filterList);
+            CacheData.interfaceServiceInstance.put(interfaceClass.getName(),myFilterWrapperInvoker);
+            CacheData.interfaceService.add(interfaceClass.getName());
+        } catch (Exception e) {
+            //
         }
     }
 
