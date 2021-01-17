@@ -15,4 +15,9 @@ public class MyNettyCommonService1207Native implements MyNettyCommonService1207{
     public void heatbeat(Heartbeat heartbeat) {
         myNettyCommonService1207.heatbeat(heartbeat);
     }
+
+    @Override
+    public String echo(String str) {
+        return myNettyCommonService1207.echo(str);
+    }
 }

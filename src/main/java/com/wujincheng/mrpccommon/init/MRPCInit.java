@@ -453,6 +453,9 @@ public class MRPCInit {
         if(ipports==null||ipports.size()==0){
             return null;
         }
+        if(ipports.size()==1){
+            return ipports.get(0);
+        }
         return ipports.get(ThreadLocalRandom.current().nextInt(ipports.size()));
     }
 

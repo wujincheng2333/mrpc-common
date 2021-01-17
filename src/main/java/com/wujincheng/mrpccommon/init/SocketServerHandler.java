@@ -17,4 +17,9 @@ public class SocketServerHandler extends SimpleChannelInboundHandler<Response> {
                 break;
         }
     }
+
+    @Override
+    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
+        ctx.channel().close();
+    }
 }

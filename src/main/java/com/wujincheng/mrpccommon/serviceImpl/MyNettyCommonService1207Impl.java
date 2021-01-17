@@ -28,4 +28,9 @@ public class MyNettyCommonService1207Impl implements MyNettyCommonService1207 {
         }
 
     }
+
+    @Override
+    public String echo(String str) {
+        return str;
+    }
 }
