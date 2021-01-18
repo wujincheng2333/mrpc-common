@@ -16,21 +16,28 @@ public class RedisClient {
 
         String ip=Config.properties.getProperty("mrpc.redis.ip","127.0.0.1");
         String port=Config.properties.getProperty("mrpc.redis.port","6379");
-        synchronized (obj){
-            if(jedis!=null){
-                return jedis;
+        try {
+            synchronized (obj){
+                if(jedis!=null){
+                    return jedis;
+                }
+                jedis = new Jedis(ip, Integer.valueOf(port));
+                jedis.connect();
+                logger.info("jedis 初始化完成");
             }
-            jedis = new Jedis(ip, Integer.valueOf(port));
-            jedis.connect();
-            logger.info("jedis 初始化完成");
+        }catch (Exception e){
+            logger.error(e.getMessage(),e);
         }
+
         return jedis;
     }
+
 
     public static void close(){
         if(jedis==null){
             return;
         }
         jedis.close();
+        jedis=null;
     }
 }
