@@ -4,6 +4,7 @@ public class Common {
 
     public static final String CHANNEL_CONTEXT="channelContext";
     public static final String RPC_INVOKE_IP_PORT="rpcInvokeIpPort";
+    public static final String SIMPLE_CLIENT="simpleClient";
 
     public static final int XIN_TIAO=1;
     public static final int RPC=9;

@@ -402,24 +402,34 @@ public class MRPCInit {
 
 
     private static Response sendRPC02(Invocation invocation,String ipport){
-        Response res=null;
-
-        if(!CacheData.channelMap.containsKey(ipport)){
-            synchronized (ipport.intern()){
-                if(!CacheData.channelMap.containsKey(ipport)){
-                    String[] str=ipport.split(":");
-                    ChannelVO channelVO=createClientChannel(str[0],str[1]);
-                    if(channelVO!=null){
-                        CacheData.channelMap.put(ipport,channelVO);
+        boolean simpleClient=(boolean)invocation.getAttachments().getOrDefault(Common.SIMPLE_CLIENT,false) ;
+        ChannelVO simpleChannelVO=null;
+        Channel channel=null;
+        if(simpleClient){
+            String[] str=ipport.split(":");
+            simpleChannelVO=createSimpleClientChannel(str[0],str[1]);
+            if(simpleChannelVO==null){
+                throw new RuntimeException("simpleChannelVO无法连接客户端:"+ipport);
+            }
+            channel=simpleChannelVO.channel;
+        }else {
+            if(!CacheData.channelMap.containsKey(ipport)){
+                synchronized (ipport.intern()){
+                    if(!CacheData.channelMap.containsKey(ipport)){
+                        String[] str=ipport.split(":");
+                        ChannelVO channelVO=createClientChannel(str[0],str[1]);
+                        if(channelVO!=null){
+                            CacheData.channelMap.put(ipport,channelVO);
+                        }
                     }
                 }
+                if(!CacheData.channelMap.containsKey(ipport)){
+                    throw new RuntimeException("无法找到客户端:"+ipport);
+                }
             }
-            if(!CacheData.channelMap.containsKey(ipport)){
-                throw new RuntimeException("无法找到客户端:"+ipport);
-            }
+            channel=CacheData.channelMap.get(ipport).channel;
         }
 
-        Channel channel=CacheData.channelMap.get(ipport).channel;
 
         Request request=new Request(CacheData.id.getAndIncrement(),Common.RPC,"");
         request.setClassName(invocation.getClassName());
@@ -445,6 +455,9 @@ public class MRPCInit {
             }
         }finally {
             CacheData.requestMap.remove(request.getId());
+            if(simpleClient){
+                closeClientChannel(simpleChannelVO);
+            }
         }
     }
 
@@ -732,13 +745,13 @@ public class MRPCInit {
                         ServerBootstrap serverBootstrap = new ServerBootstrap();
                         //绑定两个线程组
                         serverBootstrap.group(bossGroup, workerGroup)
-
                                 .childOption(ChannelOption.TCP_NODELAY, Boolean.TRUE)
                                 .childOption(ChannelOption.SO_REUSEADDR, Boolean.TRUE)
                                 .childOption(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT)
 
                                 //绑定channel模式 通过反射完成实例化
                                 .channel(NioServerSocketChannel.class)
+                                //.option(ChannelOption.SO_BACKLOG, 1024)
                                 //构造初始化
                                 .childHandler(new ChannelInitializer<SocketChannel>() {
                                     @Override
@@ -806,11 +819,57 @@ public class MRPCInit {
         return null;
     }
 
+    private static ChannelVO createSimpleClientChannel(String ip, String port){
+        try {
+            EventLoopGroup eventLoopGroup=new NioEventLoopGroup(1, new DefaultThreadFactory("MRPCNettySimpleClientWorker", true));
+            Bootstrap bootstrap=new Bootstrap();
+            bootstrap.group(eventLoopGroup)
+                    .option(ChannelOption.TCP_NODELAY, true)
+                    .channel(NioSocketChannel.class)
+                    .handler(new ChannelInitializer<SocketChannel>() {
+                        @Override
+                        protected void initChannel(SocketChannel ch) throws Exception {
+                            ChannelPipeline channelPipeline = ch.pipeline();
+                            channelPipeline.addLast(new MyDecoder());
+                            channelPipeline.addLast(new MyEncoder());
+                            channelPipeline.addLast(new SocketSimpleClientHandler());
+                        }
+                    });
+            ChannelFuture channelFuture=bootstrap.connect(ip,Integer.valueOf(port)).sync();
+            //channelFuture.addListener(ChannelFutureListener.CLOSE);
+            return new ChannelVO(channelFuture.channel(),eventLoopGroup);
+        }catch (Exception e){
+            //logger.error(e.getMessage(),e);
+        }
+        return null;
+    }
+
+//    private static ScheduledExecutorService schedulerCloseClientChannel = Executors.newScheduledThreadPool(1, new ThreadFactory() {
+//        @Override
+//        public Thread newThread(Runnable r) {
+//            Thread t = new Thread(r);
+//            t.setDaemon(true);
+//            t.setName("mrpc-schedulerCloseClientChannel");
+//            return t;
+//        }
+//    });
+
     public static void closeClientChannel(ChannelVO channelVO){
         if(channelVO==null){
             return;
         }
         try {
+//            schedulerCloseClientChannel.submit(new Runnable() {
+//                @Override
+//                public void run() {
+//                    try {
+//                        channelVO.channel.close();
+//                        channelVO.eventLoopGroup.shutdownGracefully();
+//                    }catch (Exception e){
+//                        logger.error(e.getMessage(),e);
+//                    }
+//                }
+//            });
             channelVO.channel.close();
             channelVO.eventLoopGroup.shutdownGracefully();
         }catch (Exception e){
