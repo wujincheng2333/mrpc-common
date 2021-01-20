@@ -40,14 +40,5 @@ public class CacheData {
     public static final AtomicLong id=new AtomicLong(1);
 
     //工作线程池
-    public static final ExecutorService executor =new ThreadPoolExecutor(200, 200, 5, TimeUnit.SECONDS
-            , new ArrayBlockingQueue<>(1000), new ThreadFactory() {
-        @Override
-        public Thread newThread(Runnable r) {
-            Thread t = new Thread(r);
-            t.setDaemon(true);
-            t.setName("mrpc-work");
-            return t;
-        }
-    });
+    public static ExecutorService executor =null;
 }

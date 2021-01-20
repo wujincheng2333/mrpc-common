@@ -35,6 +35,11 @@ import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.util.concurrent.DefaultThreadFactory;
+import org.apache.commons.pool2.PooledObject;
+import org.apache.commons.pool2.PooledObjectFactory;
+import org.apache.commons.pool2.impl.DefaultPooledObject;
+import org.apache.commons.pool2.impl.GenericObjectPool;
+import org.apache.commons.pool2.impl.GenericObjectPoolConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import redis.clients.jedis.Jedis;
@@ -73,7 +78,23 @@ public class MRPCInit {
             //
         }
     }
+    private static synchronized void initWorkThreadPool(){
+        if(CacheData.executor!=null){
+            return;
+        }
+        CacheData.executor =new ThreadPoolExecutor(Integer.valueOf(Config.properties.getProperty("mrpc.poolSize","200")), Integer.valueOf(Config.properties.getProperty("mrpc.poolSize","200")), 5, TimeUnit.SECONDS
+                , new LinkedBlockingQueue<>(Integer.valueOf(Config.properties.getProperty("mrpc.poolQueueSize","1000"))), new ThreadFactory() {
+            @Override
+            public Thread newThread(Runnable r) {
+                Thread t = new Thread(r);
+                t.setDaemon(true);
+                t.setName("mrpc-work");
+                return t;
+            }
+        });
+    }
     public static void init(){
+        initWorkThreadPool();
         if(start){
             return;
         }
@@ -406,8 +427,7 @@ public class MRPCInit {
         ChannelVO simpleChannelVO=null;
         Channel channel=null;
         if(simpleClient){
-            String[] str=ipport.split(":");
-            simpleChannelVO=createSimpleClientChannel(str[0],str[1]);
+            simpleChannelVO=createSimpleClientChannel(ipport);
             if(simpleChannelVO==null){
                 throw new RuntimeException("simpleChannelVO无法连接客户端:"+ipport);
             }
@@ -456,7 +476,7 @@ public class MRPCInit {
         }finally {
             CacheData.requestMap.remove(request.getId());
             if(simpleClient){
-                closeClientChannel(simpleChannelVO);
+                returnSimpleClientChannel(ipport,simpleChannelVO);
             }
         }
     }
@@ -745,12 +765,18 @@ public class MRPCInit {
                         ServerBootstrap serverBootstrap = new ServerBootstrap();
                         //绑定两个线程组
                         serverBootstrap.group(bossGroup, workerGroup)
+                                //禁用nagle算法
                                 .childOption(ChannelOption.TCP_NODELAY, Boolean.TRUE)
+                                //允许重复绑定端口
                                 .childOption(ChannelOption.SO_REUSEADDR, Boolean.TRUE)
+                                //内存池
                                 .childOption(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT)
+                                //接收缓冲区
+                                //.childOption(ChannelOption.RCVBUF_ALLOCATOR, new AdaptiveRecvByteBufAllocator(1024, 1024*8, 65536))
 
                                 //绑定channel模式 通过反射完成实例化
                                 .channel(NioServerSocketChannel.class)
+                                //接收连接数队列大小
                                 //.option(ChannelOption.SO_BACKLOG, 1024)
                                 //构造初始化
                                 .childHandler(new ChannelInitializer<SocketChannel>() {
@@ -764,7 +790,7 @@ public class MRPCInit {
                                     }
                                 });
                         //同步绑定端口并启动监听
-                        ChannelFuture channelFuture = serverBootstrap.bind("0.0.0.0",Integer.valueOf(port)).sync();
+                        ChannelFuture channelFuture = serverBootstrap.bind(Config.properties.getProperty("mrpc.ip"),Integer.valueOf(port)).sync();
                         //logger.info("监听8080...");
                         logger.info("监听[{}]...",port);
                         countDownLatch.countDown();
@@ -818,26 +844,84 @@ public class MRPCInit {
         }
         return null;
     }
+    private static Map<String,GenericObjectPool<ChannelVO>> GenericObjectPoolMap=new ConcurrentHashMap<>(16);
+    private static void returnSimpleClientChannel(String ipport,ChannelVO channelVO){
+        if(channelVO==null){
+            return;
+        }
+        GenericObjectPool<ChannelVO> clientPool=GenericObjectPoolMap.get(ipport);
+        if(clientPool==null){
+            return;
+        }
+        clientPool.returnObject(channelVO);
+    }
 
-    private static ChannelVO createSimpleClientChannel(String ip, String port){
+    private static ChannelVO createSimpleClientChannel(String ipport){
         try {
-            EventLoopGroup eventLoopGroup=new NioEventLoopGroup(1, new DefaultThreadFactory("MRPCNettySimpleClientWorker", true));
-            Bootstrap bootstrap=new Bootstrap();
-            bootstrap.group(eventLoopGroup)
-                    .option(ChannelOption.TCP_NODELAY, true)
-                    .channel(NioSocketChannel.class)
-                    .handler(new ChannelInitializer<SocketChannel>() {
-                        @Override
-                        protected void initChannel(SocketChannel ch) throws Exception {
-                            ChannelPipeline channelPipeline = ch.pipeline();
-                            channelPipeline.addLast(new MyDecoder());
-                            channelPipeline.addLast(new MyEncoder());
-                            channelPipeline.addLast(new SocketSimpleClientHandler());
-                        }
-                    });
-            ChannelFuture channelFuture=bootstrap.connect(ip,Integer.valueOf(port)).sync();
-            //channelFuture.addListener(ChannelFutureListener.CLOSE);
-            return new ChannelVO(channelFuture.channel(),eventLoopGroup);
+            GenericObjectPool<ChannelVO> clientPool=GenericObjectPoolMap.get(ipport);
+            if(clientPool!=null){
+                return clientPool.borrowObject();
+            }
+            synchronized ((ipport).intern()){
+                clientPool=GenericObjectPoolMap.get(ipport);
+                if(clientPool!=null){
+                    return clientPool.borrowObject();
+                }
+                GenericObjectPoolConfig<ChannelVO> config = new GenericObjectPoolConfig<ChannelVO>();
+                config.setMaxIdle(4);
+                config.setMinIdle(0);
+                config.setMaxTotal(4);
+                config.setSoftMinEvictableIdleTimeMillis(5000);
+                //config.setTestOnBorrow(true);
+                //config.setTestOnReturn(true);
+                clientPool = new GenericObjectPool<ChannelVO>(new PooledObjectFactory<ChannelVO>(){
+
+                    @Override
+                    public PooledObject<ChannelVO> makeObject() throws Exception {
+                        EventLoopGroup eventLoopGroup=new NioEventLoopGroup(1, new DefaultThreadFactory("MRPCNettySimpleClientWorker", true));
+                        Bootstrap bootstrap=new Bootstrap();
+                        bootstrap.group(eventLoopGroup)
+                                .option(ChannelOption.TCP_NODELAY, true)
+                                .channel(NioSocketChannel.class)
+                                .handler(new ChannelInitializer<SocketChannel>() {
+                                    @Override
+                                    protected void initChannel(SocketChannel ch) throws Exception {
+                                        ChannelPipeline channelPipeline = ch.pipeline();
+                                        channelPipeline.addLast(new MyDecoder());
+                                        channelPipeline.addLast(new MyEncoder());
+                                        channelPipeline.addLast(new SocketSimpleClientHandler());
+                                    }
+                                });
+                        String[] str=ipport.split(":");
+                        ChannelFuture channelFuture=bootstrap.connect(str[0],Integer.valueOf(str[1])).sync();
+                        //channelFuture.addListener(ChannelFutureListener.CLOSE);
+                        return new DefaultPooledObject<>(new ChannelVO(channelFuture.channel(),eventLoopGroup));
+                    }
+
+                    @Override
+                    public void destroyObject(PooledObject<ChannelVO> p) throws Exception {
+                        closeClientChannel(p.getObject());
+                    }
+
+                    @Override
+                    public boolean validateObject(PooledObject<ChannelVO> p) {
+                        return false;
+                    }
+
+                    @Override
+                    public void activateObject(PooledObject<ChannelVO> p) throws Exception {
+
+                    }
+
+                    @Override
+                    public void passivateObject(PooledObject<ChannelVO> p) throws Exception {
+
+                    }
+                }, config);
+                GenericObjectPoolMap.put(ipport,clientPool);
+                return clientPool.borrowObject();
+            }
+
         }catch (Exception e){
             //logger.error(e.getMessage(),e);
         }
